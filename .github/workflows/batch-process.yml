@@ -62,7 +62,7 @@ jobs:
           mkdir -p ./photos ./temp/shrink ./output
 
           # Download images from OneDrive (only new ones)
-          rclone copy "onedrive:Pictures/Camera Roll" ./photos \
+          rclone copy onedrive:Pictures/CameraRoll ./photos \
             --include "*.jpg" \
             --include "*.jpeg" \
             --include "*.png" \
@@ -91,7 +91,7 @@ jobs:
       - name: Upload XMP files to OneDrive
         run: |
           # Upload generated XMP files back to OneDrive
-          rclone copy ./output "onedrive:Pictures/Camera Roll" \
+          rclone copy ./output onedrive:Pictures/CameraRoll \
             --include "*.xmp" \
             --progress
 

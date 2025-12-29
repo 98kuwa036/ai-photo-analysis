@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-photo-analyzer"
+version = "1.0.0"
+description = "AI-powered photo analysis system with Japanese translation and Mylio Photos integration"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "AI Photo Analyzer Team"}
+]
+keywords = ["photo", "analysis", "ai", "vision", "translation", "mylio", "xmp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+]
+
+dependencies = [
+    "Pillow>=10.0.0",
+    "google-cloud-vision>=3.4.0",
+    "deepl>=1.15.0",
+    "watchdog>=3.0.0",
+    "APScheduler>=3.10.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "msal>=1.24.0",
+    "requests>=2.31.0",
+    "colorlog>=6.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+photo-analyzer = "src.main:main"
+
+[project.urls]
+Homepage = "https://github.com/example/ai-photo-analyzer"
+Documentation = "https://github.com/example/ai-photo-analyzer#readme"
+Issues = "https://github.com/example/ai-photo-analyzer/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

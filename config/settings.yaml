@@ -1,0 +1,122 @@
+# AI Photo Analysis System Configuration
+
+# OneDrive Settings
+onedrive:
+  # Folder to monitor for new photos
+  watch_folder: "Pictures/Camera Roll"
+  # Supported image extensions (for AI analysis)
+  supported_extensions:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".heic"
+    - ".heif"
+    - ".webp"
+
+# RAW Image Settings
+raw_processing:
+  # Enable RAW image processing
+  enabled: true
+  # RAW file extensions to detect
+  raw_extensions:
+    # Canon
+    - ".cr2"
+    - ".cr3"
+    - ".crw"
+    # Nikon
+    - ".nef"
+    - ".nrw"
+    # Sony
+    - ".arw"
+    - ".srf"
+    - ".sr2"
+    # Fujifilm
+    - ".raf"
+    # Olympus/OM System
+    - ".orf"
+    # Panasonic
+    - ".rw2"
+    # Pentax
+    - ".pef"
+    - ".dng"
+    # Leica
+    - ".dng"
+    - ".rwl"
+    # Adobe DNG (universal)
+    - ".dng"
+    # Samsung
+    - ".srw"
+    # Sigma
+    - ".x3f"
+  # Preferred source extensions for analysis (in priority order)
+  # When RAW exists, look for these to analyze instead
+  analysis_source_priority:
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".heic"
+    - ".heif"
+  # Add these labels to RAW images
+  raw_labels:
+    japanese:
+      - "RAW"
+      - "RAW画像"
+      - "生データ"
+    english:
+      - "RAW"
+      - "RAW Image"
+      - "Unprocessed"
+
+# Image Processing Settings
+image_processing:
+  # Short edge size for shrink images (pixels)
+  shrink_size: 640
+  # Quality for JPEG compression (1-100)
+  jpeg_quality: 85
+  # Temporary folder for shrink images
+  temp_folder: "temp/shrink"
+
+# Google Cloud Vision Settings
+vision_api:
+  # Maximum labels to return
+  max_labels: 20
+  # Minimum confidence score (0.0-1.0)
+  min_confidence: 0.7
+  # Features to detect
+  features:
+    - LABEL_DETECTION
+    - LANDMARK_DETECTION
+    - FACE_DETECTION
+    - OBJECT_LOCALIZATION
+
+# DeepL Translation Settings
+deepl:
+  # Target language
+  target_lang: "JA"
+  # Source language (auto-detect if not specified)
+  source_lang: "EN"
+  # Formality level (default, more, less, prefer_more, prefer_less)
+  formality: "default"
+
+# XMP Settings
+xmp:
+  # Creator tool name
+  creator_tool: "AI Photo Analyzer"
+  # Include original English tags
+  include_original: true
+
+# Scheduler Settings
+scheduler:
+  # Batch processing time (24-hour format)
+  batch_start_hour: 2
+  batch_start_minute: 0
+  # Timezone
+  timezone: "Asia/Tokyo"
+  # Enable immediate processing (for testing)
+  enable_immediate: false
+
+# Logging Settings
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/photo_analyzer.log"

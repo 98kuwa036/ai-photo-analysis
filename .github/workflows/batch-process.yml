@@ -1,0 +1,110 @@
+# AI Photo Analysis - Scheduled Batch Processing
+# 深夜2時（JST）に自動実行、または手動トリガー可能
+
+name: Photo Analysis Batch
+
+on:
+  # 毎日深夜2時（JST = UTC+9、つまりUTC 17:00）に実行
+  schedule:
+    - cron: '0 17 * * *'
+
+  # 手動実行も可能
+  workflow_dispatch:
+    inputs:
+      force_reprocess:
+        description: 'Force reprocess all images (ignore existing XMP)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  process-photos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd ai-photo-analyzer
+          pip install -r requirements.txt
+
+      - name: Set up Google Cloud credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-key.json" >> $GITHUB_ENV
+
+      - name: Configure rclone for OneDrive
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          [onedrive]
+          type = onedrive
+          token = ${{ secrets.ONEDRIVE_TOKEN }}
+          drive_id = ${{ secrets.ONEDRIVE_DRIVE_ID }}
+          drive_type = personal
+          EOF
+
+      - name: Download pending images from OneDrive
+        run: |
+          # Create local directories
+          mkdir -p ./photos ./temp/shrink ./output
+
+          # Download images from OneDrive (only new ones)
+          rclone copy onedrive:Pictures/CameraRoll ./photos \
+            --include "*.jpg" \
+            --include "*.jpeg" \
+            --include "*.png" \
+            --include "*.heic" \
+            --include "*.CR2" \
+            --include "*.NEF" \
+            --include "*.ARW" \
+            --include "*.RAF" \
+            --include "*.ORF" \
+            --include "*.DNG" \
+            --max-age 7d \
+            --progress
+
+      - name: Run photo analysis
+        env:
+          DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
+          FORCE_REPROCESS: ${{ github.event.inputs.force_reprocess }}
+        run: |
+          cd ai-photo-analyzer
+          python -m src.cloud_runner \
+            --input-dir ../photos \
+            --output-dir ../output \
+            --temp-dir ../temp/shrink \
+            ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
+
+      - name: Upload XMP files to OneDrive
+        run: |
+          # Upload generated XMP files back to OneDrive
+          rclone copy ./output onedrive:Pictures/CameraRoll \
+            --include "*.xmp" \
+            --progress
+
+      - name: Generate processing report
+        run: |
+          echo "## Photo Processing Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Photos found**: $(find ./photos -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- **XMP generated**: $(find ./output -name '*.xmp' | wc -l)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Clean up credentials
+        if: always()
+        run: |
+          rm -f /tmp/gcloud-key.json
+          rm -rf ~/.config/rclone

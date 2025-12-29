@@ -1,0 +1,30 @@
+# AI Photo Analysis System Dependencies
+
+# Image processing
+Pillow>=10.0.0
+
+# Google Cloud Vision API
+google-cloud-vision>=3.4.0
+
+# DeepL Translation
+deepl>=1.15.0
+
+# File watching
+watchdog>=3.0.0
+
+# Scheduling
+APScheduler>=3.10.0
+
+# Configuration
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# OneDrive API (Microsoft Graph)
+msal>=1.24.0
+requests>=2.31.0
+
+# Logging
+colorlog>=6.7.0
+
+# Type hints
+typing-extensions>=4.8.0

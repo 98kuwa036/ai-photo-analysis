@@ -39,6 +39,11 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Install rclone
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb
+          sudo dpkg -i rclone-current-linux-amd64.deb
+
       - name: Set up Google Cloud credentials
         run: |
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
@@ -47,13 +52,14 @@ jobs:
       - name: Configure rclone for OneDrive
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << 'EOF'
+          cat > ~/.config/rclone/rclone.conf << EOF
           [onedrive]
           type = onedrive
           token = ${{ secrets.ONEDRIVE_TOKEN }}
           drive_id = ${{ secrets.ONEDRIVE_DRIVE_ID }}
           drive_type = personal
           EOF
+          sed -i 's/^          //' ~/.config/rclone/rclone.conf
 
       - name: Download pending images from OneDrive
         run: |

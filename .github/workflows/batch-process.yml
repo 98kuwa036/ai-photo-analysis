@@ -37,7 +37,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd ai-photo-analyzer
           pip install -r requirements.txt
 
       - name: Set up Google Cloud credentials
@@ -81,11 +80,10 @@ jobs:
           DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
           FORCE_REPROCESS: ${{ github.event.inputs.force_reprocess }}
         run: |
-          cd ai-photo-analyzer
           python -m src.cloud_runner \
-            --input-dir ../photos \
-            --output-dir ../output \
-            --temp-dir ../temp/shrink \
+            --input-dir ./photos \
+            --output-dir ./output \
+            --temp-dir ./temp/shrink \
             ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
 
       - name: Upload XMP files to OneDrive

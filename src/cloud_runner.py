@@ -5,7 +5,7 @@ Simplified runner for cloud environments (GitHub Actions, Google Colab, etc.)
 Processes images from a local directory and generates XMP files.
 
 Usage:
-    python -m src.cloud_runner --input-dir ./photos --output-dir ./output
+    python -m src.cloud_runner --input-dir ./photos --output-dir ./output --cache-file ./config/translation_cache.json
 """
 
 import argparse
@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Set
 
 # Set up logging
 logging.basicConfig(
@@ -38,6 +38,68 @@ def setup_environment():
         return False
 
     return True
+
+
+class DeepLTranslator:
+    """Handles translation with local caching to save API usage."""
+
+    def __init__(self, api_key: str, cache_file: Path):
+        self.translator = None
+        if api_key:
+            import deepl
+            self.translator = deepl.Translator(api_key)
+        
+        self.cache_file = cache_file
+        self.cache: Dict[str, str] = self._load_cache()
+        self.modified = False
+
+    def _load_cache(self) -> Dict[str, str]:
+        if self.cache_file.exists():
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}")
+                return {}
+        return {}
+
+    def save_cache(self):
+        if self.modified:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+            logger.info("Translation cache saved.")
+
+    def translate_text(self, text: str) -> str:
+        """Translate text from English to Japanese using cache or API."""
+        if not text:
+            return ""
+            
+        # Check cache first
+        if text in self.cache:
+            return self.cache[text]
+
+        if not self.translator:
+            return text
+
+        # Call DeepL API
+        try:
+            result = self.translator.translate_text(
+                text,
+                source_lang="EN",
+                target_lang="JA"
+            )
+            translated_text = result.text
+            
+            # Update cache
+            self.cache[text] = translated_text
+            self.modified = True
+            logger.info(f"DeepL Translated: {text} -> {translated_text}")
+            
+            return translated_text
+        except Exception as e:
+            logger.error(f"DeepL API Error: {e}")
+            return text
 
 
 class CloudPhotoProcessor:
@@ -64,6 +126,8 @@ class CloudPhotoProcessor:
         input_dir: Path,
         output_dir: Path,
         temp_dir: Path,
+        cache_file: Path,
+        travel_keywords: str = "",
         shrink_size: int = 640,
         force_reprocess: bool = False,
     ):
@@ -72,14 +136,20 @@ class CloudPhotoProcessor:
         self.temp_dir = temp_dir
         self.shrink_size = shrink_size
         self.force_reprocess = force_reprocess
+        
+        # Parse travel keywords
+        self.travel_keywords = [k.strip().lower() for k in travel_keywords.split(',') if k.strip()]
 
         # Create directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize services lazily
+        # Initialize services
         self._vision_client = None
-        self._translator = None
+        self.translator = DeepLTranslator(
+            os.environ.get("DEEPL_API_KEY", ""),
+            cache_file
+        )
 
         # Statistics
         self.stats = {
@@ -98,15 +168,6 @@ class CloudPhotoProcessor:
             self._vision_client = vision.ImageAnnotatorClient()
         return self._vision_client
 
-    @property
-    def translator(self):
-        """Lazy initialization of DeepL translator."""
-        if self._translator is None:
-            import deepl
-            api_key = os.environ.get("DEEPL_API_KEY")
-            self._translator = deepl.Translator(api_key)
-        return self._translator
-
     def is_raw_file(self, path: Path) -> bool:
         """Check if file is a RAW image."""
         return path.suffix.lower() in self.RAW_EXTENSIONS
@@ -114,6 +175,11 @@ class CloudPhotoProcessor:
     def is_image_file(self, path: Path) -> bool:
         """Check if file is a regular image."""
         return path.suffix.lower() in self.IMAGE_EXTENSIONS
+
+    def is_travel_photo(self, path: Path) -> bool:
+        """Check if photo is likely a travel/landscape photo based on path."""
+        path_str = str(path).lower()
+        return any(k in path_str for k in self.travel_keywords)
 
     def find_analysis_source(self, raw_path: Path) -> Optional[Path]:
         """Find JPEG/PNG source for RAW file analysis."""
@@ -178,8 +244,8 @@ class CloudPhotoProcessor:
             logger.error(f"Failed to create shrink for {image_path}: {e}")
             return None
 
-    def analyze_image(self, image_path: Path) -> list[str]:
-        """Analyze image with Vision API and return labels."""
+    def analyze_image(self, image_path: Path, enable_landmark: bool = False) -> dict:
+        """Analyze image with Vision API and return results."""
         from google.cloud import vision
 
         try:
@@ -188,84 +254,64 @@ class CloudPhotoProcessor:
 
             image = vision.Image(content=content)
 
+            # Define features
+            features = [
+                {"type_": vision.Feature.Type.LABEL_DETECTION, "max_results": 20},
+                {"type_": vision.Feature.Type.TEXT_DETECTION},  # OCR is always enabled
+            ]
+            
+            if enable_landmark:
+                features.append({"type_": vision.Feature.Type.LANDMARK_DETECTION, "max_results": 5})
+                logger.info("  -> Travel mode: LANDMARK_DETECTION enabled")
+
             response = self.vision_client.annotate_image({
                 "image": image,
-                "features": [
-                    {"type_": vision.Feature.Type.LABEL_DETECTION, "max_results": 20},
-                    {"type_": vision.Feature.Type.LANDMARK_DETECTION, "max_results": 5},
-                    {"type_": vision.Feature.Type.OBJECT_LOCALIZATION, "max_results": 10},
-                ],
+                "features": features,
             })
 
-            labels = []
+            result = {
+                "labels": [],
+                "landmarks": [],
+                "text": ""
+            }
 
             # Extract labels
             for label in response.label_annotations:
                 if label.score >= 0.7:
-                    labels.append(label.description)
+                    result["labels"].append(label.description)
 
             # Extract landmarks
             for landmark in response.landmark_annotations:
                 if landmark.score >= 0.7:
-                    labels.append(landmark.description)
+                    result["landmarks"].append(landmark.description)
 
-            # Extract objects
-            for obj in response.localized_object_annotations:
-                if obj.score >= 0.7 and obj.name not in labels:
-                    labels.append(obj.name)
+            # Extract text (OCR)
+            if response.text_annotations:
+                # The first element contains the full text
+                result["text"] = response.text_annotations[0].description.strip()
 
-            return labels
+            return result
 
         except Exception as e:
             logger.error(f"Vision API error for {image_path}: {e}")
-            return []
-
-    def translate_labels(self, labels: list[str]) -> list[str]:
-        """Translate English labels to Japanese."""
-        if not labels:
-            return []
-
-        try:
-            results = self.translator.translate_text(
-                labels,
-                source_lang="EN",
-                target_lang="JA",
-            )
-            return [r.text for r in results]
-        except Exception as e:
-            logger.error(f"Translation error: {e}")
-            return labels  # Return original as fallback
+            return {}
 
     def generate_xmp(
         self,
-        japanese_labels: list[str],
-        english_labels: list[str],
-        is_raw: bool = False,
-        raw_ext: str = "",
+        tags: List[str],
+        description: str,
     ) -> str:
         """Generate XMP content."""
         modify_date = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Build keyword list
-        keywords = []
-        if is_raw:
-            keywords.extend(self.RAW_LABELS_JA)
-            keywords.extend(self.RAW_LABELS_EN)
-            if raw_ext:
-                keywords.append(raw_ext.upper().lstrip("."))
+        # Create XML safe tags
+        safe_tags = []
+        for tag in sorted(list(set(tags))): # Remove duplicates and sort
+            safe_tags.append(tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+            
+        safe_desc = description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-        keywords.extend(japanese_labels)
-        keywords.extend(english_labels)
-
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_keywords = []
-        for kw in keywords:
-            if kw.lower() not in seen:
-                seen.add(kw.lower())
-                unique_keywords.append(kw)
-
-        # Build XMP
+        # Build XMP manually to avoid extra dependencies like jinja2
         xmp = f'''<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="AI Photo Analyzer (Cloud)">
   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -278,21 +324,16 @@ class CloudPhotoProcessor:
       <dc:subject>
         <rdf:Bag>
 '''
-        for kw in unique_keywords:
-            escaped = kw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            xmp += f'          <rdf:li>{escaped}</rdf:li>\n'
+        for tag in safe_tags:
+            xmp += f'          <rdf:li>{tag}</rdf:li>\n'
 
         xmp += '''        </rdf:Bag>
       </dc:subject>
-      <lr:hierarchicalSubject>
-        <rdf:Bag>
-'''
-        for kw in unique_keywords:
-            escaped = kw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            xmp += f'          <rdf:li>{escaped}</rdf:li>\n'
-
-        xmp += '''        </rdf:Bag>
-      </lr:hierarchicalSubject>
+      <dc:description>
+        <rdf:Alt>
+          <rdf:li xml:lang="x-default">''' + safe_desc + '''</rdf:li>
+        </rdf:Alt>
+      </dc:description>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
@@ -319,23 +360,46 @@ class CloudPhotoProcessor:
             return
 
         try:
+            # Check for travel keywords
+            is_travel = self.is_travel_photo(target_path)
+            
             # Analyze with Vision API
-            english_labels = self.analyze_image(shrink_path)
-            if not english_labels:
-                logger.warning(f"No labels detected: {target_path.name}")
+            analysis_result = self.analyze_image(shrink_path, enable_landmark=is_travel)
+            
+            if not analysis_result:
                 self.stats["failed"] += 1
                 return
 
-            # Translate to Japanese
-            japanese_labels = self.translate_labels(english_labels)
+            # Prepare tags list
+            all_tags = []
+            
+            # Process Labels (Translate)
+            labels = analysis_result.get("labels", [])
+            for label in labels:
+                all_tags.append(label) # English
+                all_tags.append(self.translator.translate_text(label)) # Japanese
 
-            # Generate XMP
+            # Process Landmarks (Translate)
+            landmarks = analysis_result.get("landmarks", [])
+            for landmark in landmarks:
+                all_tags.append(landmark) # English
+                all_tags.append(self.translator.translate_text(landmark)) # Japanese
+
+            # Process RAW tags
             raw_ext = raw_path.suffix if raw_path else ""
+            if is_raw:
+                all_tags.extend(self.RAW_LABELS_JA)
+                all_tags.extend(self.RAW_LABELS_EN)
+                if raw_ext:
+                    all_tags.append(raw_ext.upper().lstrip("."))
+
+            # Process OCR Text (Do NOT Translate, put in description)
+            ocr_text = analysis_result.get("text", "")
+            
+            # Generate XMP
             xmp_content = self.generate_xmp(
-                japanese_labels=japanese_labels,
-                english_labels=english_labels,
-                is_raw=is_raw,
-                raw_ext=raw_ext,
+                tags=all_tags,
+                description=ocr_text
             )
 
             # Save XMP
@@ -343,10 +407,10 @@ class CloudPhotoProcessor:
             xmp_path.parent.mkdir(parents=True, exist_ok=True)
             xmp_path.write_text(xmp_content, encoding="utf-8")
 
-            logger.info(f"Generated: {xmp_path.name} ({len(japanese_labels)} labels)")
+            logger.info(f"Generated: {xmp_path.name} ({len(labels)} labels, {len(landmarks)} landmarks)")
 
             self.stats["processed"] += 1
-            self.stats["labels_total"] += len(japanese_labels)
+            self.stats["labels_total"] += len(all_tags)
             if is_raw:
                 self.stats["raw_processed"] += 1
 
@@ -370,7 +434,8 @@ class CloudPhotoProcessor:
     def run(self):
         """Run the processing pipeline."""
         logger.info(f"Scanning: {self.input_dir}")
-
+        logger.info(f"Travel keywords: {self.travel_keywords}")
+        
         # Collect all files
         all_files = list(self.input_dir.rglob("*"))
         images = [f for f in all_files if self.is_image_file(f)]
@@ -378,33 +443,34 @@ class CloudPhotoProcessor:
 
         logger.info(f"Found {len(images)} images, {len(raws)} RAW files")
 
-        # Track processed RAW files to avoid duplicates
         processed_raws = set()
 
-        # Process RAW files first
-        for raw_path in raws:
-            source = self.find_analysis_source(raw_path)
-            if source:
-                self.process_image(source, is_raw=True, raw_path=raw_path)
-                processed_raws.add(raw_path.stem.lower())
-            else:
-                logger.warning(f"No source for RAW: {raw_path.name}")
+        try:
+            # Process RAW files first
+            for raw_path in raws:
+                source = self.find_analysis_source(raw_path)
+                if source:
+                    self.process_image(source, is_raw=True, raw_path=raw_path)
+                    processed_raws.add(raw_path.stem.lower())
+                else:
+                    logger.warning(f"No source for RAW: {raw_path.name}")
 
-        # Process regular images (skip if RAW pair exists)
-        for image_path in images:
-            if image_path.stem.lower() in processed_raws:
-                logger.debug(f"Skipping (has RAW pair): {image_path.name}")
-                continue
+            # Process regular images
+            for image_path in images:
+                if image_path.stem.lower() in processed_raws:
+                    continue
 
-            raw_pair = self.find_raw_pair(image_path)
-            if raw_pair:
-                # Process for RAW instead
-                if raw_pair.stem.lower() not in processed_raws:
-                    self.process_image(image_path, is_raw=True, raw_path=raw_pair)
-                    processed_raws.add(raw_pair.stem.lower())
-            else:
-                # Regular image processing
-                self.process_image(image_path)
+                raw_pair = self.find_raw_pair(image_path)
+                if raw_pair:
+                    if raw_pair.stem.lower() not in processed_raws:
+                        self.process_image(image_path, is_raw=True, raw_path=raw_pair)
+                        processed_raws.add(raw_pair.stem.lower())
+                else:
+                    self.process_image(image_path)
+        
+        finally:
+            # Save translation cache before exiting
+            self.translator.save_cache()
 
         # Print summary
         logger.info("=" * 50)
@@ -413,7 +479,7 @@ class CloudPhotoProcessor:
         logger.info(f"  RAW files: {self.stats['raw_processed']}")
         logger.info(f"  Skipped:   {self.stats['skipped']}")
         logger.info(f"  Failed:    {self.stats['failed']}")
-        logger.info(f"  Total labels: {self.stats['labels_total']}")
+        logger.info(f"  Total tags: {self.stats['labels_total']}")
 
         return self.stats
 
@@ -439,6 +505,18 @@ def main():
         help="Temporary directory for shrink images",
     )
     parser.add_argument(
+        "--cache-file",
+        type=Path,
+        default=Path("./translation_cache.json"),
+        help="Path to DeepL translation cache file",
+    )
+    parser.add_argument(
+        "--travel-keywords",
+        type=str,
+        default="",
+        help="Comma separated keywords to enable landmark detection",
+    )
+    parser.add_argument(
         "--shrink-size",
         type=int,
         default=640,
@@ -461,6 +539,8 @@ def main():
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         temp_dir=args.temp_dir,
+        cache_file=args.cache_file,
+        travel_keywords=args.travel_keywords,
         shrink_size=args.shrink_size,
         force_reprocess=args.force,
     )

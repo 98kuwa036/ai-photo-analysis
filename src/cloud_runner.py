@@ -149,8 +149,12 @@ class CloudPhotoProcessor:
                     lat = self._convert_to_degrees(geotags['GPSLatitude'])
                     lon = self._convert_to_degrees(geotags['GPSLongitude'])
                     
-                    if geotags.get('GPSLatitudeRef') == 'S': lat = -lat
-                    if geotags.get('GPSLongitudeRef') == 'W': lon = -lon
+                    ref = geotags.get('GPSLatitudeRef')
+                    if ref == 'S' or ref == b'S': lat = -lat
+                    
+                    lon_ref = geotags.get('GPSLongitudeRef')
+                    if lon_ref == 'W' or lon_ref == b'W':
+                    lon = -lon
                     
                     return (lat, lon)
         except Exception:

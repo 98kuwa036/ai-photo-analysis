@@ -1,24 +1,21 @@
 # AI Photo Analysis - Scheduled Batch Processing
-# 深夜2時（JST）に自動実行、または手動トリガー可能
-
 name: Photo Analysis Batch
 
 on:
-  # 毎日深夜2時（JST = UTC+9、つまりUTC 17:00）に実行
   schedule:
-    - cron: '0 17 * * *'
-
-  # 手動実行も可能
+    - cron: '0 17 * * *' # JST 02:00
   workflow_dispatch:
     inputs:
       force_reprocess:
-        description: 'Force reprocess all images (ignore existing XMP)'
+        description: 'Force reprocess all images'
         required: false
         default: 'false'
         type: boolean
 
 env:
   PYTHON_VERSION: '3.11'
+  # 旅行・風景とみなすフォルダ名のキーワード（カンマ区切り）
+  TRAVEL_KEYWORDS: 'Travel,Trip,Journey,Vacation,観光,旅行,風景,Landscape'
 
 jobs:
   process-photos:
@@ -44,42 +41,37 @@ jobs:
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb
           sudo dpkg -i rclone-current-linux-amd64.deb
 
-      - name: Set up Google Cloud credentials
-        run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-key.json" >> $GITHUB_ENV
-
-      - name: Configure rclone for OneDrive
+      - name: Configure rclone
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << EOF
-          [onedrive]
-          type = onedrive
-          token = ${{ secrets.ONEDRIVE_TOKEN }}
-          drive_id = ${{ secrets.ONEDRIVE_DRIVE_ID }}
-          drive_type = personal
-          EOF
-          sed -i 's/^          //' ~/.config/rclone/rclone.conf
+          echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
-      - name: Download pending images from OneDrive
+      # 【追加】翻訳キャッシュ（辞書）をダウンロード
+      - name: Download translation cache
+        continue-on-error: true # 初回はないのでエラー無視
         run: |
-          # Create local directories
-          mkdir -p ./photos ./temp/shrink ./output
+          mkdir -p ./config
+          rclone copy onedrive:Config/translation_cache.json ./config/
 
-          # Download images from OneDrive (only new ones)
+      - name: Download photos from OneDrive
+        run: |
+          mkdir -p ./photos
+          # 写真フォルダをダウンロード（必要な拡張子のみ）
           rclone copy onedrive:Pictures/CameraRoll ./photos \
             --include "*.jpg" \
             --include "*.jpeg" \
             --include "*.png" \
             --include "*.heic" \
-            --include "*.CR2" \
-            --include "*.NEF" \
-            --include "*.ARW" \
-            --include "*.RAF" \
-            --include "*.ORF" \
-            --include "*.DNG" \
+            --include "*.webp" \
             --max-age 7d \
             --progress
+
+      - name: Set up Google Cloud credentials
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-key.json" >> $GITHUB_ENV
 
       - name: Run photo analysis
         env:
@@ -89,17 +81,26 @@ jobs:
           python -m src.cloud_runner \
             --input-dir ./photos \
             --output-dir ./output \
-            --temp-dir ./temp/shrink \
+            --cache-file ./config/translation_cache.json \
+            --travel-keywords "${{ env.TRAVEL_KEYWORDS }}" \
             ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
+
+      # 【追加】更新された翻訳キャッシュをアップロード
+      # (処理が失敗しても、翻訳した分だけは保存するように if: always() を付与)
+      - name: Save translation cache
+        if: always()
+        run: |
+          rclone copy ./config/translation_cache.json onedrive:Config/
 
       - name: Upload XMP files to OneDrive
         run: |
-          # Upload generated XMP files back to OneDrive
           rclone copy ./output onedrive:Pictures/CameraRoll \
             --include "*.xmp" \
             --progress
 
+      # 【復元】処理レポートの生成
       - name: Generate processing report
+        if: always()
         run: |
           echo "## Photo Processing Report" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -107,6 +108,7 @@ jobs:
           echo "- **Photos found**: $(find ./photos -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "- **XMP generated**: $(find ./output -name '*.xmp' | wc -l)" >> $GITHUB_STEP_SUMMARY
 
+      # 【復元】認証情報のクリーンアップ
       - name: Clean up credentials
         if: always()
         run: |

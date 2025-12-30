@@ -41,14 +41,22 @@ jobs:
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb
           sudo dpkg -i rclone-current-linux-amd64.deb
 
+      # 【修正】Secretsを組み合わせて rclone.conf を生成
       - name: Configure rclone
         env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+          ONEDRIVE_TOKEN: ${{ secrets.ONEDRIVE_TOKEN }}
+          ONEDRIVE_DRIVE_ID: ${{ secrets.ONEDRIVE_DRIVE_ID }}
         run: |
           mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          cat << EOF > ~/.config/rclone/rclone.conf
+          [onedrive]
+          type = onedrive
+          drive_type = personal
+          token = $ONEDRIVE_TOKEN
+          drive_id = $ONEDRIVE_DRIVE_ID
+          EOF
 
-      # 【追加】翻訳キャッシュ（辞書）をダウンロード
+      # 翻訳キャッシュ（辞書）をダウンロード
       - name: Download translation cache
         continue-on-error: true # 初回はないのでエラー無視
         run: |
@@ -85,8 +93,7 @@ jobs:
             --travel-keywords "${{ env.TRAVEL_KEYWORDS }}" \
             ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
 
-      # 【追加】更新された翻訳キャッシュをアップロード
-      # (処理が失敗しても、翻訳した分だけは保存するように if: always() を付与)
+      # 更新された翻訳キャッシュをアップロード
       - name: Save translation cache
         if: always()
         run: |
@@ -98,7 +105,7 @@ jobs:
             --include "*.xmp" \
             --progress
 
-      # 【復元】処理レポートの生成
+      # 処理レポートの生成
       - name: Generate processing report
         if: always()
         run: |
@@ -108,7 +115,7 @@ jobs:
           echo "- **Photos found**: $(find ./photos -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "- **XMP generated**: $(find ./output -name '*.xmp' | wc -l)" >> $GITHUB_STEP_SUMMARY
 
-      # 【復元】認証情報のクリーンアップ
+      # 認証情報のクリーンアップ
       - name: Clean up credentials
         if: always()
         run: |

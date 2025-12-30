@@ -14,8 +14,6 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  # 旅行・風景とみなすフォルダ名のキーワード（カンマ区切り）
-  TRAVEL_KEYWORDS: 'Travel,Trip,Journey,Vacation,観光,旅行,風景,Landscape'
 
 jobs:
   process-photos:
@@ -41,7 +39,7 @@ jobs:
           curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb
           sudo dpkg -i rclone-current-linux-amd64.deb
 
-      # 【修正】Secretsを組み合わせて rclone.conf を生成
+      # Secretsを組み合わせて rclone.conf を生成
       - name: Configure rclone
         env:
           ONEDRIVE_TOKEN: ${{ secrets.ONEDRIVE_TOKEN }}
@@ -56,9 +54,8 @@ jobs:
           drive_id = $ONEDRIVE_DRIVE_ID
           EOF
 
-      # 翻訳キャッシュ（辞書）をダウンロード
       - name: Download translation cache
-        continue-on-error: true # 初回はないのでエラー無視
+        continue-on-error: true
         run: |
           mkdir -p ./config
           rclone copy onedrive:Config/translation_cache.json ./config/
@@ -66,7 +63,6 @@ jobs:
       - name: Download photos from OneDrive
         run: |
           mkdir -p ./photos
-          # 写真フォルダをダウンロード（必要な拡張子のみ）
           rclone copy onedrive:Pictures/CameraRoll ./photos \
             --include "*.jpg" \
             --include "*.jpeg" \
@@ -81,19 +77,20 @@ jobs:
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-key.json" >> $GITHUB_ENV
 
+      # 【修正】ファイル名キーワードではなく、自宅位置情報(GPS)を渡す
       - name: Run photo analysis
         env:
           DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
+          HOME_LOCATION: ${{ secrets.HOME_LOCATION }} # 例: "35.6895,139.6917"
           FORCE_REPROCESS: ${{ github.event.inputs.force_reprocess }}
         run: |
           python -m src.cloud_runner \
             --input-dir ./photos \
             --output-dir ./output \
             --cache-file ./config/translation_cache.json \
-            --travel-keywords "${{ env.TRAVEL_KEYWORDS }}" \
+            --home-location "$HOME_LOCATION" \
             ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
 
-      # 更新された翻訳キャッシュをアップロード
       - name: Save translation cache
         if: always()
         run: |
@@ -105,7 +102,6 @@ jobs:
             --include "*.xmp" \
             --progress
 
-      # 処理レポートの生成
       - name: Generate processing report
         if: always()
         run: |
@@ -115,7 +111,6 @@ jobs:
           echo "- **Photos found**: $(find ./photos -type f | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "- **XMP generated**: $(find ./output -name '*.xmp' | wc -l)" >> $GITHUB_STEP_SUMMARY
 
-      # 認証情報のクリーンアップ
       - name: Clean up credentials
         if: always()
         run: |

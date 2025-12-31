@@ -85,7 +85,7 @@ class DeepLTranslator:
 
 
 class ProcessingHistory:
-    """Manages the history of processed files to prevent duplicate API calls."""
+    """Manages the history of processed files."""
     def __init__(self, history_file: Path):
         self.history_file = history_file
         self.history: Dict[str, str] = self._load_history()
@@ -108,11 +108,9 @@ class ProcessingHistory:
             logger.info("Processing history saved.")
 
     def is_processed(self, file_stem: str) -> bool:
-        """Check if a file (by stem name) has already been processed."""
         return file_stem in self.history
 
     def add(self, file_stem: str):
-        """Record a file as processed with current JST timestamp."""
         now_jst = datetime.now(JST).isoformat()
         self.history[file_stem] = now_jst
         self.modified = True
@@ -142,7 +140,6 @@ class CloudPhotoProcessor:
         self.shrink_size = shrink_size
         self.force_reprocess = force_reprocess
         
-        # Parse Home Location (Lat,Lon)
         self.home_lat = None
         self.home_lon = None
         if home_location:
@@ -152,7 +149,7 @@ class CloudPhotoProcessor:
                 self.home_lon = float(parts[1].strip())
                 logger.info(f"Home location set: {self.home_lat}, {self.home_lon}")
             except Exception:
-                logger.warning("Invalid home location format. Landmark detection logic will rely on defaults.")
+                logger.warning("Invalid home location format.")
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -170,8 +167,21 @@ class CloudPhotoProcessor:
             self._vision_client = vision.ImageAnnotatorClient()
         return self._vision_client
 
+    # 【復活・修正】正しいXMPパスを生成するメソッド
+    def get_xmp_path(self, image_path: Path, is_raw: bool = False) -> Path:
+        """Get XMP output path. Uses .stem (no ext) for normal images, .name for RAW."""
+        relative = image_path.relative_to(self.input_dir)
+
+        if is_raw:
+            # RAWの場合: DSC001.ARW -> DSC001.ARW.xmp
+            xmp_name = f"{image_path.name}.xmp"
+        else:
+            # JPEG/PNGの場合: IMG_001.jpg -> IMG_001.xmp (拡張子なし)
+            xmp_name = f"{image_path.stem}.xmp"
+
+        return self.output_dir / relative.parent / xmp_name
+
     def _get_exif_gps(self, image_path: Path) -> Optional[tuple[float, float]]:
-        """Extract GPS (Lat, Lon) from image EXIF."""
         try:
             with Image.open(image_path) as img:
                 exif = img.getexif()
@@ -181,24 +191,19 @@ class CloudPhotoProcessor:
                 for (idx, tag) in TAGS.items():
                     if tag == 'GPSInfo':
                         if idx not in exif: return None
-                        
                         gps_info = exif.get_ifd(idx)
                         for (key, val) in GPSTAGS.items():
-                            if key in gps_info:
-                                geotags[val] = gps_info[key]
+                            if key in gps_info: geotags[val] = gps_info[key]
 
                 if 'GPSLatitude' in geotags and 'GPSLongitude' in geotags:
                     lat = self._convert_to_degrees(geotags['GPSLatitude'])
                     lon = self._convert_to_degrees(geotags['GPSLongitude'])
                     
-                    # Handle Lat/Lon Ref (N/S, E/W) including bytes type
                     lat_ref = geotags.get('GPSLatitudeRef')
-                    if lat_ref == 'S' or lat_ref == b'S':
-                        lat = -lat
+                    if lat_ref == 'S' or lat_ref == b'S': lat = -lat
                     
                     lon_ref = geotags.get('GPSLongitudeRef')
-                    if lon_ref == 'W' or lon_ref == b'W':
-                        lon = -lon
+                    if lon_ref == 'W' or lon_ref == b'W': lon = -lon
                     
                     return (lat, lon)
         except Exception:
@@ -206,15 +211,13 @@ class CloudPhotoProcessor:
         return None
 
     def _convert_to_degrees(self, value):
-        """Helper to convert GPS rational to degrees."""
         d = float(value[0])
         m = float(value[1])
         s = float(value[2])
         return d + (m / 60.0) + (s / 3600.0)
 
     def _calculate_distance(self, lat1, lon1, lat2, lon2):
-        """Calculate Haversine distance in km."""
-        R = 6371  # Earth radius in km
+        R = 6371
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
         a = math.sin(dlat/2) * math.sin(dlat/2) + \
@@ -224,10 +227,7 @@ class CloudPhotoProcessor:
         return R * c
 
     def is_travel_photo(self, image_path: Path) -> bool:
-        """Determine if landmark detection should be enabled based on GPS."""
-        if self.home_lat is None or self.home_lon is None:
-            return False
-
+        if self.home_lat is None or self.home_lon is None: return False
         gps = self._get_exif_gps(image_path)
         if gps:
             lat, lon = gps
@@ -238,7 +238,6 @@ class CloudPhotoProcessor:
             else:
                 logger.info(f"  -> Local photo. Distance: {dist:.1f}km")
                 return False
-        
         return False
 
     def create_shrink_image(self, image_path: Path) -> Optional[Path]:
@@ -248,7 +247,6 @@ class CloudPhotoProcessor:
             with Image.open(image_path) as img:
                 if img.mode in ("RGBA", "P"): img = img.convert("RGB")
                 
-                # Resize logic
                 width, height = img.size
                 scale = self.shrink_size / min(width, height)
                 if scale < 1:
@@ -324,33 +322,35 @@ class CloudPhotoProcessor:
     def process_image(self, image_path: Path, is_raw: bool = False, raw_path: Optional[Path] = None):
         target_path = raw_path if is_raw else image_path
         
-        # 【重要】二重スキップ判定
+        # 【重要】スキップ判定を一番最初に行う（無駄な処理防止）
+        
         # 1. 履歴台帳チェック (ファイル名で判断)
         if not self.force_reprocess and self.history.is_processed(target_path.stem):
             logger.info(f"Skipping (In History): {target_path.name}")
             self.stats["skipped"] += 1
             return
 
-        # 2. XMP存在チェック
-        xmp_exists = (self.output_dir / target_path.relative_to(self.input_dir).parent / f"{target_path.name}.xmp").exists()
-        if not self.force_reprocess and xmp_exists:
+        # 2. XMP存在チェック (正しいパスを使用)
+        xmp_path = self.get_xmp_path(target_path, is_raw)
+        if not self.force_reprocess and xmp_path.exists():
             logger.info(f"Skipping (XMP exists): {target_path.name}")
-            # XMPはあるが履歴にない場合、履歴に追加しておく（整合性を取るため）
             self.history.add(target_path.stem)
             self.stats["skipped"] += 1
             return
 
         logger.info(f"Processing: {target_path.name}")
         
+        # --- ここから重い処理が始まります ---
+        
         # 1. 縮小画像作成
         shrink_path = self.create_shrink_image(image_path)
         if not shrink_path: return
 
         try:
-            # 2. GPSによる旅行判定 (元画像を使う)
+            # 2. GPSによる旅行判定
             is_travel = self.is_travel_photo(image_path)
 
-            # 3. Vision API 分析 (縮小画像を使う)
+            # 3. Vision API 分析
             result = self.analyze_image(shrink_path, enable_landmark=is_travel)
             if not result:
                 self.stats["failed"] += 1
@@ -367,12 +367,10 @@ class CloudPhotoProcessor:
             # 5. XMP保存
             xmp_content = self.generate_xmp(all_tags, result["text"])
             
-            rel_path = target_path.relative_to(self.input_dir)
-            xmp_path = self.output_dir / rel_path.parent / f"{target_path.name}.xmp"
             xmp_path.parent.mkdir(parents=True, exist_ok=True)
             xmp_path.write_text(xmp_content, encoding="utf-8")
             
-            # 【重要】履歴に追加
+            # 完了したら履歴に追加
             self.history.add(target_path.stem)
             
             self.stats["processed"] += 1
@@ -389,7 +387,6 @@ class CloudPhotoProcessor:
         # RAWペア処理
         processed_stems = set()
         for raw in raws:
-            # JPEGソースを探す（同名）
             src = next((f for f in images if f.stem == raw.stem and f.parent == raw.parent), None)
             if src:
                 self.process_image(src, is_raw=True, raw_path=raw)
@@ -400,7 +397,6 @@ class CloudPhotoProcessor:
             if img.stem not in processed_stems:
                 self.process_image(img)
 
-        # 最後にキャッシュと履歴を保存
         self.translator.save_cache()
         self.history.save_history()
         

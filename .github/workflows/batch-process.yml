@@ -54,11 +54,14 @@ jobs:
           drive_id = $ONEDRIVE_DRIVE_ID
           EOF
 
-      - name: Download translation cache
+      - name: Download Config files (Cache & History)
         continue-on-error: true
         run: |
           mkdir -p ./config
+          # 翻訳キャッシュ
           rclone copy onedrive:Config/translation_cache.json ./config/
+          # 【追加】処理履歴ファイル
+          rclone copy onedrive:Config/processing_history.json ./config/
 
       - name: Download photos from OneDrive
         run: |
@@ -77,24 +80,27 @@ jobs:
           echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/gcloud-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-key.json" >> $GITHUB_ENV
 
-      # 【修正】ファイル名キーワードではなく、自宅位置情報(GPS)を渡す
+      # 【修正】履歴ファイルパスを指定
       - name: Run photo analysis
         env:
           DEEPL_API_KEY: ${{ secrets.DEEPL_API_KEY }}
-          HOME_LOCATION: ${{ secrets.HOME_LOCATION }} # 例: "35.6895,139.6917"
+          HOME_LOCATION: ${{ secrets.HOME_LOCATION }}
           FORCE_REPROCESS: ${{ github.event.inputs.force_reprocess }}
         run: |
           python -m src.cloud_runner \
             --input-dir ./photos \
             --output-dir ./output \
             --cache-file ./config/translation_cache.json \
+            --history-file ./config/processing_history.json \
             --home-location "$HOME_LOCATION" \
             ${{ github.event.inputs.force_reprocess == 'true' && '--force' || '' }}
 
-      - name: Save translation cache
+      # 【追加】更新された履歴とキャッシュをアップロード
+      - name: Save Config files
         if: always()
         run: |
           rclone copy ./config/translation_cache.json onedrive:Config/
+          rclone copy ./config/processing_history.json onedrive:Config/
 
       - name: Upload XMP files to OneDrive
         run: |

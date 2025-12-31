@@ -2,7 +2,7 @@
 """Cloud Runner for AI Photo Analysis
 
 Usage:
-    python -m src.cloud_runner --input-dir ./photos --output-dir ./output --cache-file ./config/translation_cache.json --home-location "35.689,139.691"
+    python -m src.cloud_runner --input-dir ./photos --output-dir ./output --cache-file ./config/translation_cache.json --history-file ./config/processing_history.json --home-location "35.689,139.691"
 """
 
 import argparse
@@ -11,9 +11,9 @@ import logging
 import os
 import sys
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Any
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
@@ -23,6 +23,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# JST timezone definition
+JST = timezone(timedelta(hours=9), 'JST')
 
 
 def setup_environment():
@@ -41,8 +44,11 @@ class DeepLTranslator:
     def __init__(self, api_key: str, cache_file: Path):
         self.translator = None
         if api_key:
-            import deepl
-            self.translator = deepl.Translator(api_key)
+            try:
+                import deepl
+                self.translator = deepl.Translator(api_key)
+            except ImportError:
+                logger.warning("deepl library not installed. Translation disabled.")
         
         self.cache_file = cache_file
         self.cache: Dict[str, str] = self._load_cache()
@@ -78,6 +84,40 @@ class DeepLTranslator:
             return text
 
 
+class ProcessingHistory:
+    """Manages the history of processed files to prevent duplicate API calls."""
+    def __init__(self, history_file: Path):
+        self.history_file = history_file
+        self.history: Dict[str, str] = self._load_history()
+        self.modified = False
+
+    def _load_history(self) -> Dict[str, str]:
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_history(self):
+        if self.modified:
+            self.history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=2)
+            logger.info("Processing history saved.")
+
+    def is_processed(self, file_stem: str) -> bool:
+        """Check if a file (by stem name) has already been processed."""
+        return file_stem in self.history
+
+    def add(self, file_stem: str):
+        """Record a file as processed with current JST timestamp."""
+        now_jst = datetime.now(JST).isoformat()
+        self.history[file_stem] = now_jst
+        self.modified = True
+
+
 class CloudPhotoProcessor:
     """Simplified photo processor for cloud environments."""
     
@@ -91,6 +131,7 @@ class CloudPhotoProcessor:
         output_dir: Path,
         temp_dir: Path,
         cache_file: Path,
+        history_file: Path,
         home_location: str = "",
         shrink_size: int = 640,
         force_reprocess: bool = False,
@@ -118,6 +159,7 @@ class CloudPhotoProcessor:
 
         self._vision_client = None
         self.translator = DeepLTranslator(os.environ.get("DEEPL_API_KEY", ""), cache_file)
+        self.history = ProcessingHistory(history_file)
 
         self.stats = {"processed": 0, "skipped": 0, "failed": 0, "labels_total": 0}
 
@@ -149,12 +191,14 @@ class CloudPhotoProcessor:
                     lat = self._convert_to_degrees(geotags['GPSLatitude'])
                     lon = self._convert_to_degrees(geotags['GPSLongitude'])
                     
-                    ref = geotags.get('GPSLatitudeRef')
-                    if ref == 'S' or ref == b'S': lat = -lat
+                    # Handle Lat/Lon Ref (N/S, E/W) including bytes type
+                    lat_ref = geotags.get('GPSLatitudeRef')
+                    if lat_ref == 'S' or lat_ref == b'S':
+                        lat = -lat
                     
                     lon_ref = geotags.get('GPSLongitudeRef')
                     if lon_ref == 'W' or lon_ref == b'W':
-                    lon = -lon
+                        lon = -lon
                     
                     return (lat, lon)
         except Exception:
@@ -181,7 +225,6 @@ class CloudPhotoProcessor:
 
     def is_travel_photo(self, image_path: Path) -> bool:
         """Determine if landmark detection should be enabled based on GPS."""
-        # もし自宅位置が設定されていなければ、デフォルトOFF（節約のため）
         if self.home_lat is None or self.home_lon is None:
             return False
 
@@ -189,7 +232,6 @@ class CloudPhotoProcessor:
         if gps:
             lat, lon = gps
             dist = self._calculate_distance(self.home_lat, self.home_lon, lat, lon)
-            # 自宅から20km以上離れていれば旅行とみなす
             if dist > 20.0:
                 logger.info(f"  -> Travel detected! Distance: {dist:.1f}km")
                 return True
@@ -197,7 +239,6 @@ class CloudPhotoProcessor:
                 logger.info(f"  -> Local photo. Distance: {dist:.1f}km")
                 return False
         
-        # GPSがない場合、安全側に倒してOFFにする（あるいは好みでTrueにする）
         return False
 
     def create_shrink_image(self, image_path: Path) -> Optional[Path]:
@@ -282,7 +323,20 @@ class CloudPhotoProcessor:
 
     def process_image(self, image_path: Path, is_raw: bool = False, raw_path: Optional[Path] = None):
         target_path = raw_path if is_raw else image_path
-        if not self.force_reprocess and (self.output_dir / target_path.relative_to(self.input_dir).parent / f"{target_path.name}.xmp").exists():
+        
+        # 【重要】二重スキップ判定
+        # 1. 履歴台帳チェック (ファイル名で判断)
+        if not self.force_reprocess and self.history.is_processed(target_path.stem):
+            logger.info(f"Skipping (In History): {target_path.name}")
+            self.stats["skipped"] += 1
+            return
+
+        # 2. XMP存在チェック
+        xmp_exists = (self.output_dir / target_path.relative_to(self.input_dir).parent / f"{target_path.name}.xmp").exists()
+        if not self.force_reprocess and xmp_exists:
+            logger.info(f"Skipping (XMP exists): {target_path.name}")
+            # XMPはあるが履歴にない場合、履歴に追加しておく（整合性を取るため）
+            self.history.add(target_path.stem)
             self.stats["skipped"] += 1
             return
 
@@ -318,6 +372,9 @@ class CloudPhotoProcessor:
             xmp_path.parent.mkdir(parents=True, exist_ok=True)
             xmp_path.write_text(xmp_content, encoding="utf-8")
             
+            # 【重要】履歴に追加
+            self.history.add(target_path.stem)
+            
             self.stats["processed"] += 1
             self.stats["labels_total"] += len(all_tags)
 
@@ -343,7 +400,10 @@ class CloudPhotoProcessor:
             if img.stem not in processed_stems:
                 self.process_image(img)
 
+        # 最後にキャッシュと履歴を保存
         self.translator.save_cache()
+        self.history.save_history()
+        
         return self.stats
 
 def main():
@@ -352,6 +412,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--temp-dir", type=Path, default=Path("./temp"))
     parser.add_argument("--cache-file", type=Path, default=Path("./cache.json"))
+    parser.add_argument("--history-file", type=Path, default=Path("./history.json"))
     parser.add_argument("--home-location", type=str, default="")
     parser.add_argument("--force", action="store_true")
     
@@ -359,7 +420,8 @@ def main():
     if not setup_environment(): sys.exit(1)
     
     CloudPhotoProcessor(
-        args.input_dir, args.output_dir, args.temp_dir, args.cache_file,
+        args.input_dir, args.output_dir, args.temp_dir, 
+        args.cache_file, args.history_file,
         args.home_location, force_reprocess=args.force
     ).run()
 
